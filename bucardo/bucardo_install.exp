@@ -1,0 +1,25 @@
+#!/usr/bin/expect -f
+# Drives Bucardo's interactive `install` non-interactively.
+#
+# Why: `bucardo install` prints a settings menu and reads "P to proceed" from the
+# controlling terminal, so it hangs under `ssh --command` or piped stdin. expect
+# gives it a PTY and answers the prompts.
+#
+# Critical: install must connect as a Postgres SUPERUSER to create the `bucardo`
+# control database + role. We pass --dbhost=/var/run/postgresql --dbuser=postgres
+# --dbname=postgres so it uses the local socket as `postgres` (peer auth, no
+# password). Left to the Debian /etc/bucardorc defaults it instead tries to connect
+# as the `bucardo` role (which does not exist yet) and blocks on a password prompt.
+#
+# After install, align the control-DB role password with /etc/bucardorc:
+#   sudo -u postgres psql -c "ALTER ROLE bucardo PASSWORD 'bucardo'"
+log_user 1
+set timeout 150
+spawn sudo -u postgres bucardo install --dbhost=/var/run/postgresql --dbport=5432 --dbuser=postgres --dbname=postgres
+expect {
+  -re {P to proceed}            { send -- "P\r"; exp_continue }
+  -re {already exists.*\?}      { send -- "y\r"; exp_continue }
+  -re {\[y/N\]|\(y/n\)|yes/no}  { send -- "y\r"; exp_continue }
+  timeout                       { puts "\nEXPECT_TIMEOUT"; exit 2 }
+  eof
+}
