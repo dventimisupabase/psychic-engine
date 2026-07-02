@@ -1,9 +1,14 @@
--- migtest crawl-stage data model
--- Single size knob: bump :scale for walk/run. Generated entirely server-side.
-\set scale 1
+-- migtest data model generator. Server-side; size scales via :scale.
+-- Override scale on the CLI:  psql -v scale=100 -f build_migtest.sql   (default 1)
+\if :{?scale}
+\else
+  \set scale 1
+\endif
 
 \timing on
-SET max_parallel_workers_per_gather = 0;  -- keep generation deterministic with setseed
+-- Generation parallelizes across cores by default (fast at large scale). setseed() below
+-- only yields reproducible data under single-threaded execution; for bit-for-bit
+-- reproducibility also add:  SET max_parallel_workers_per_gather = 0;
 SELECT setseed(0.42);
 
 BEGIN;
