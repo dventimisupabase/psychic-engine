@@ -10,17 +10,22 @@ Initial full-copy (Bucardo `onetimecopy`) throughput for the `shop` dataset, per
 
 ## Results
 
-| scale | rows       | target size | copy time | rows/s   | MB/s | CDC lag |
-|------:|-----------:|------------:|----------:|---------:|-----:|--------:|
-| 1     | 255,607    | ~151 MB     | 9 s       | ~28,400  | ~17  | ~4 s    |
-| 10    | 2,554,079  | 938 MB      | 114 s     | ~22,400  | ~8.2 | ~4 s    |
+| scale | rows       | target size | copy time      | rows/s   | CDC lag | target |
+|------:|-----------:|------------:|---------------:|---------:|--------:|--------|
+| 1     | 255,607    | ~151 MB     | 9 s            | ~28,400  | ~4 s    | small  |
+| 10    | 2,554,079  | 938 MB      | 114 s          | ~22,400  | ~4 s    | small  |
+| 100†  | 25,553,940 | ~9.6 GB     | 239 s (copy)   | ~107,000 | ~2 s    | medium |
 
-Dataset = full `shop` schema incl. 1.5M `events` rows (scale=10) with a GIN index on `jsonb` `payload`, maintained during load.
+Dataset = full `shop` schema incl. `events` (1.5M rows at scale=10, 15M at scale=100) with a GIN index on `jsonb` `payload`.
+
+† **scale=100 used a manual index workaround, not vanilla onetimecopy.** Vanilla onetimecopy (indexes present → the `events` GIN maintained inline, row by row) ran at ~2,700 rows/s and was aborted at ~35 min (≈1.5 h projected; see issue #3). Instead we did the Bucardo-native workaround: `DROP INDEX` the target's secondary indexes → Bucardo `onetimecopy` **index-free = 239 s / ~107K rows/s** → rebuild indexes = **btrees ~76 s + GIN ~836 s (~14 min)**. End-to-end ≈ **19 min**, dominated by the 15M-row `jsonb` GIN rebuild. NB: scale 1 & 10 copy times *include* inline index maintenance, so the 100 copy figure is not apples-to-apples.
 
 ## Notes
-- All 6 tables verified row-for-row against source after each copy; ongoing CDC confirmed each time (source insert lands on target in ~4 s).
-- **pg_flight_recorder** (troubleshooting profile) on the target captured each copy. At scale=10: WAL rose ~16 MB -> ~2.5 GB over the copy window; wait events CPU-bound with light `DataFileRead`; a post-copy vacuum cleaned up the `events` GIN index; no anomalies.
-- Throughput dip 1 -> 10 (28.4K -> 22.4K rows/s) is expected: GIN-index maintenance on the larger `events` table plus WAN to the target.
+- All tables verified row-for-row against source after each copy; ongoing CDC confirmed each time.
+- **CDC scales flat:** at scale=100 (25.5M rows in place) a 500-row insert replicated in ~2 s and an update + delete propagated correctly. CDC lag tracks change volume, not table size, Bucardo's strong suit. The initial bulk copy is its weak one.
+- **onetimecopy doesn't scale (issue #3):** all tables in one transaction, indexes maintained inline. Bucardo's built-in `rebuild_index` would help but writes `pg_class` directly (superuser-only → barred on managed targets), hence the manual DROP/CREATE INDEX workaround.
+- **Supabase `statement_timeout` gotcha:** the manual GIN rebuild is killed by the default 2-min `statement_timeout`; the rebuild session needs `SET statement_timeout = 0` (Bucardo's own connections already do this).
+- **pg_flight_recorder** (troubleshooting profile) runs on every target and captured each copy (e.g. at scale=10 WAL rose ~16 MB -> ~2.5 GB; post-copy GIN vacuum; no anomalies). On the AlloyDB source it's not installable without enabling `pg_cron` (flag + restart); see issue #2.
 - **Cloud SQL / AlloyDB targets are not usable with stock Bucardo** (they block `session_replication_role`); see issue #1. Supabase permits it, so these are unmodified-Bucardo runs.
 
 ## Reproduction
