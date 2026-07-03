@@ -34,10 +34,12 @@ google_ml
 public
 F
 
-# NB: against a Supabase target, pgcopydb has HUNG in the post-copy VACUUM phase
-# (vacuum workers' connections drop; it blocks with no timeout). The data + all
-# indexes complete before that step, so add --skip-vacuum if you hit it and run
-# ANALYZE yourself afterward.
+# NB: against a Supabase target this HANGS after the events GIN build -- the
+# CREATE INDEX commits but pgcopydb's index worker never exits (0% CPU, needs a
+# manual pkill). Data + all indexes are complete before the hang. --skip-vacuum
+# does NOT help (confirmed). Workarounds if you hit it: exclude the GIN via a
+# [exclude-index] filter and build it manually after, or wrap this to detect the
+# post-GIN idle hang, kill pgcopydb, and run ANALYZE yourself.
 pgcopydb clone \
   --table-jobs "$JOBS" --index-jobs 4 \
   --split-tables-larger-than 256MB \
