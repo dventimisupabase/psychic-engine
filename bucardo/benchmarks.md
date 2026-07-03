@@ -94,7 +94,24 @@ ERROR:  permission denied for function pg_replication_origin_oid
 
 The `pg_replication_origin_*` functions are **superuser-only**, and Supabase's `postgres` is not a superuser, so pgCopyDB `--follow` cannot manage its apply-tracking origin and exits `rc=12`. This is why the customer moved off pgCopyDB `--follow`: a native `CREATE SUBSCRIPTION` manages replication origins **internally** (inside the apply worker), so it never issues the client-level `pg_replication_origin_*` call that pgCopyDB does. Note: on failure pgCopyDB leaves the **source slot behind**, drop it (`pg_drop_replication_slot`) or it retains WAL on AlloyDB.
 
-**native LR (next):** should sidestep the origin-permission wall, but it is *subscriber-pull*, so the Supabase subscriber must reach the private AlloyDB publisher (needs a public path: an AlloyDB public IP, or a tunnel via the VM's public IP + a firewall rule).
+**native LR: privilege-viable on Supabase (confirmed).** The AlloyDB source can `CREATE PUBLICATION` as `postgres`, and the Supabase `postgres` is a member of `pg_create_subscription` (a `WITH (connect=false)` probe only tripped the standard "non-superuser must put a password in the conninfo" rule, not a privilege block). So native LR does sidestep the `pg_replication_origin` wall (the subscription's apply worker manages origins internally) and matches the customer's production choice. We did NOT run the full streaming test: it is subscriber-pull, so it needs the private AlloyDB exposed to Supabase (public IP + authorized networks); native pg SSL requires the real endpoint (a `socat` tunnel can't TLS-terminate Postgres's SSL negotiation, so it would leak the password in cleartext). Given native LR is already proven in the customer's prod, the exposure was not worth it for confirmatory numbers.
+
+### Choosing a CDC tool (AlloyDB -> Supabase, and generally)
+
+Beyond "does it work," the choice turns on source/target constraints:
+
+| dimension | Bucardo (triggers) | native LR |
+|---|---|---|
+| Logical replication required | no | yes |
+| Source `wal_level=logical` (needs a restart) | **no** | yes |
+| Expose the source (subscriber-pull) | **no** (VM pushes; both conns outbound) | yes (target must reach source) |
+| Target privilege needed | `session_replication_role=replica` | `pg_create_subscription` |
+| Source write overhead | triggers + delta rows (heavier) | logical decoding reads WAL (lighter) |
+| Extra moving parts | Perl daemon + control DB | none (built-in) |
+
+- **Bucardo's edge:** needs neither a source restart nor source exposure, and works on targets that restrict LR/subscriptions. Pick it when you can't restart/expose the source, or the target forbids LR.
+- **native LR's edge:** lighter on the source write path (no triggers), standard Postgres. Pick it when the source permits logical decoding + can be exposed and you want minimal source overhead.
+- **pgCopyDB `--follow`:** ruled out for Supabase (target `pg_replication_origin` superuser wall).
 
 ## Reproduction
 - Data generator: `sql/build_migtest.sql` (`\set scale N`; 1 -> 255K rows, 10 -> 2.55M).
