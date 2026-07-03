@@ -46,6 +46,26 @@ Bucardo `onetimecopy` does **not** scale to this rung. Its single-transaction co
 - **Disk was the real scale=1000 blocker earlier:** the target disk was only 12 GB. Grew it online to 250 GB via `POST https://api.supabase.green/v1/projects/{ref}/config/disk` with `{"attributes":{"size_gb":250,...}}` (Bearer = dashboard session JWT; `PATCH`/`PUT` 404, `POST` needs the `attributes` wrapper).
 - **CDC at scale=1000 confirmed:** Bucardo `onetimecopy=0` (delta triggers only, no re-copy — the DIY load already placed the data, and the source is static so there is no snapshot→trigger gap). Insert (1 category + 500 events) replicated in **~4 s**, update **~3 s**, delete **~4 s**; sync state Good. Lag is **size-independent** (same ~2-4 s as scale 1/10/100): Bucardo's CDC scales flat — the initial copy was the only part that needed the DIY workaround. Daemon runs as the `bucardo` OS user (`sudo -u bucardo bucardo start`); files live under `/var/{log,run}/bucardo`.
 
+## pgCopyDB (initial copy) + Bucardo (CDC) — scale=100, index-heavy
+
+The "buy" alternative to the DIY snapshot copy: **pgCopyDB for the initial bulk load** (no `--follow`, so still logical-replication-free), **Bucardo for CDC**. Target = green project `jatchjltrqzdmghigvtu` with the **IPv4 add-on** (pgCopyDB uses a *direct* connection, not the pooler; the VM is IPv4-only and Supabase direct is IPv6-only without the add-on). Needed **pgcopydb 0.18 + postgresql-client-17** from PGDG — Debian's stock 0.10 is PG15-only and cannot dump a PG17 server.
+
+Source (AlloyDB, PG17) = full index-heavy `shop`: 25,553,940 rows, 17 indexes incl. a GIN on `events.payload`, 5 FKs.
+
+| metric | value |
+|---|---|
+| rows | 25,553,940 (all 6 tables source == target) |
+| indexes | all 17 rebuilt + valid (incl. GIN, 3.4 GB) |
+| copy + index time | **~17 min** |
+| target size | ~9.1 GB |
+| parallelism | auto-split events→15 COPY procs (on event_id), orders/order_items→4 each; `--index-jobs 4` |
+
+- **Batteries included, and it showed:** one `pgcopydb clone` did schema (pre/post-data via pg_dump/pg_restore 17), parallel COPY with **automatic PK-range splitting** (no key-picking), parallel index rebuild **incl. the GIN**, and sequence resets, while filtering the AlloyDB source's sharp edges via flags: `--exclude-schema bucardo,ai,google_ml,public`, `--skip-extensions` (the `google_*` AlloyDB extensions), `--no-owner --no-acl`. Comparable wall-clock to the scale=100 Bucardo index-workaround (~19 min) but **fully automatic** vs the manual DROP/COPY/CREATE dance.
+- **Sharp edge (the "buy" tax):** pgcopydb **hung in the post-copy `VACUUM ANALYZE` phase** against the Supabase target — the vacuum workers' connections dropped and it blocked indefinitely (0% CPU, ~15+ min, no timeout/recovery), needing a manual kill. **The data + all 17 indexes were already complete and correct**, so the copy functionally succeeded; operationally it needs supervision or a mitigation (`--skip-vacuum`, fewer `--table-jobs`, or retry). This is a real pgcopydb↔managed-target rough edge the DIY (simple pooler-friendly per-chunk COPY) never hit.
+- **IPv4 add-on required:** cheap on Supabase ($4/mo, provisioned via the `/platform/` Management API); on a stricter managed platform with no direct-connection option it could be a hard blocker — the DIY-vs-buy tradeoff in miniature.
+
+**CDC (Bucardo `onetimecopy=0`) on the pgcopydb-loaded target:** insert ~4 s, update ~3 s, delete ~4 s — identical to every other rung (size-independent). The full **pgCopyDB + Bucardo** pipeline works end to end.
+
 ## Reproduction
 - Data generator: `sql/build_migtest.sql` (`\set scale N`; 1 -> 255K rows, 10 -> 2.55M).
 - Bucardo target wiring: drop stale target db, `bucardo add db <green> ...`, `add relgroup migrels`, `add table shop.* db=alloydb_src relgroup=migrels`, `add sync migsync relgroup=migrels dbs=alloydb_src:source,<green>:target onetimecopy=2`, `start`, `kick migsync 0`. See `bucardo/configure_sync.sh`.
