@@ -44,7 +44,7 @@ Bucardo `onetimecopy` does **not** scale to this rung. Its single-transaction co
 - **Index-light rung (user decision):** the scale=1000 source carries no secondary/GIN indexes (stripped for generation feasibility), so none were built on the target. The 6 btrees + the `events` GIN were exercised at scale=100.
 - **Throughput is WAN-bound, not tunable from the copy side (evidenced):** 8 workers == 16 workers (same ~5-6 MB/s, so not parallelism); 14 of 16 target COPY backends parked on `ClientRead` (target *starved*, not write-bound, so a bigger target compute wouldn't help); copy-host CPU ~85% idle. The ceiling is the cross-cloud path GCP us-west1 → Supabase session pooler @ AWS us-east-1.
 - **Disk was the real scale=1000 blocker earlier:** the target disk was only 12 GB. Grew it online to 250 GB via `POST https://api.supabase.green/v1/projects/{ref}/config/disk` with `{"attributes":{"size_gb":250,...}}` (Bearer = dashboard session JWT; `PATCH`/`PUT` 404, `POST` needs the `attributes` wrapper).
-- CDC lag at scale=1000: _(pending Bucardo CDC test)_.
+- **CDC at scale=1000 confirmed:** Bucardo `onetimecopy=0` (delta triggers only, no re-copy — the DIY load already placed the data, and the source is static so there is no snapshot→trigger gap). Insert (1 category + 500 events) replicated in **~4 s**, update **~3 s**, delete **~4 s**; sync state Good. Lag is **size-independent** (same ~2-4 s as scale 1/10/100): Bucardo's CDC scales flat — the initial copy was the only part that needed the DIY workaround. Daemon runs as the `bucardo` OS user (`sudo -u bucardo bucardo start`); files live under `/var/{log,run}/bucardo`.
 
 ## Reproduction
 - Data generator: `sql/build_migtest.sql` (`\set scale N`; 1 -> 255K rows, 10 -> 2.55M).
