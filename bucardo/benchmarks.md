@@ -4,7 +4,7 @@ Initial full-copy (Bucardo `onetimecopy`) throughput for the `shop` dataset, per
 
 ## Topology
 - **Source:** AlloyDB PostgreSQL 17 (`migtest.shop`), us-west2, via the AlloyDB Auth Proxy.
-- **Bucardo host:** GCE `e2-micro` (Debian 12), us-west1 — daemon + control DB only.
+- **Bucardo host:** GCE `e2-micro` (Debian 12), us-west1, daemon + control DB only.
 - **Target:** Supabase (green) PostgreSQL 17, `small` compute, us-east-1, via the session pooler.
 - Cross-region source -> host -> target (real WAN on the target write hop).
 
@@ -28,9 +28,9 @@ Dataset = full `shop` schema incl. `events` (1.5M rows at scale=10, 15M at scale
 - **pg_flight_recorder** (troubleshooting profile) runs on every target and captured each copy (e.g. at scale=10 WAL rose ~16 MB -> ~2.5 GB; post-copy GIN vacuum; no anomalies). On the AlloyDB source it's not installable without enabling `pg_cron` (flag + restart); see issue #2.
 - **Cloud SQL / AlloyDB targets are not usable with stock Bucardo** (they block `session_replication_role`); see issue #1. Supabase permits it, so these are unmodified-Bucardo runs.
 
-## scale=1000 initial copy — DIY snapshot method (not Bucardo onetimecopy)
+## scale=1000 initial copy, DIY snapshot method (not Bucardo onetimecopy)
 
-Bucardo `onetimecopy` does **not** scale to this rung. Its single-transaction copy holds ~100 GB of un-recyclable WAL on top of the data (≈2× disk), which crashed the target at scale=1000 (issue #3). So the initial bulk load used a **DIY logical-replication-free snapshot copy** (`bucardo/diy_initial_sync.py`): one `pg_export_snapshot()` anchor connection + N parallel workers that `SET TRANSACTION SNAPSHOT` and stream binary `COPY` per PK-range chunk, committing per chunk (WAL recycles, no disk bomb). No replication slot, no `wal_level=logical` — so it stays logical-replication-free, like Bucardo's triggers. Bucardo is then used for **ongoing CDC only** (`onetimecopy=0`).
+Bucardo `onetimecopy` does **not** scale to this rung. Its single-transaction copy holds ~100 GB of un-recyclable WAL on top of the data (≈2× disk), which crashed the target at scale=1000 (issue #3). So the initial bulk load used a **DIY logical-replication-free snapshot copy** (`bucardo/diy_initial_sync.py`): one `pg_export_snapshot()` anchor connection + N parallel workers that `SET TRANSACTION SNAPSHOT` and stream binary `COPY` per PK-range chunk, committing per chunk (WAL recycles, no disk bomb). No replication slot, no `wal_level=logical`, so it stays logical-replication-free, like Bucardo's triggers. Bucardo is then used for **ongoing CDC only** (`onetimecopy=0`).
 
 | metric | value |
 |---|---|
@@ -44,11 +44,11 @@ Bucardo `onetimecopy` does **not** scale to this rung. Its single-transaction co
 - **Index-light rung (user decision):** the scale=1000 source carries no secondary/GIN indexes (stripped for generation feasibility), so none were built on the target. The 6 btrees + the `events` GIN were exercised at scale=100.
 - **Throughput is WAN-bound, not tunable from the copy side (evidenced):** 8 workers == 16 workers (same ~5-6 MB/s, so not parallelism); 14 of 16 target COPY backends parked on `ClientRead` (target *starved*, not write-bound, so a bigger target compute wouldn't help); copy-host CPU ~85% idle. The ceiling is the cross-cloud path GCP us-west1 → Supabase session pooler @ AWS us-east-1.
 - **Disk was the real scale=1000 blocker earlier:** the target disk was only 12 GB. Grew it online to 250 GB via `POST https://api.supabase.green/v1/projects/{ref}/config/disk` with `{"attributes":{"size_gb":250,...}}` (Bearer = dashboard session JWT; `PATCH`/`PUT` 404, `POST` needs the `attributes` wrapper).
-- **CDC at scale=1000 confirmed:** Bucardo `onetimecopy=0` (delta triggers only, no re-copy — the DIY load already placed the data, and the source is static so there is no snapshot→trigger gap). Insert (1 category + 500 events) replicated in **~4 s**, update **~3 s**, delete **~4 s**; sync state Good. Lag is **size-independent** (same ~2-4 s as scale 1/10/100): Bucardo's CDC scales flat — the initial copy was the only part that needed the DIY workaround. Daemon runs as the `bucardo` OS user (`sudo -u bucardo bucardo start`); files live under `/var/{log,run}/bucardo`.
+- **CDC at scale=1000 confirmed:** Bucardo `onetimecopy=0` (delta triggers only, no re-copy, the DIY load already placed the data, and the source is static so there is no snapshot→trigger gap). Insert (1 category + 500 events) replicated in **~4 s**, update **~3 s**, delete **~4 s**; sync state Good. Lag is **size-independent** (same ~2-4 s as scale 1/10/100): Bucardo's CDC scales flat, the initial copy was the only part that needed the DIY workaround. Daemon runs as the `bucardo` OS user (`sudo -u bucardo bucardo start`); files live under `/var/{log,run}/bucardo`.
 
-## pgCopyDB (initial copy) + Bucardo (CDC) — scale=100, index-heavy
+## pgCopyDB (initial copy) + Bucardo (CDC), scale=100, index-heavy
 
-The "buy" alternative to the DIY snapshot copy: **pgCopyDB for the initial bulk load** (no `--follow`, so still logical-replication-free), **Bucardo for CDC**. Target = green project `jatchjltrqzdmghigvtu` with the **IPv4 add-on** (pgCopyDB uses a *direct* connection, not the pooler; the VM is IPv4-only and Supabase direct is IPv6-only without the add-on). Needed **pgcopydb 0.18 + postgresql-client-17** from PGDG — Debian's stock 0.10 is PG15-only and cannot dump a PG17 server.
+The "buy" alternative to the DIY snapshot copy: **pgCopyDB for the initial bulk load** (no `--follow`, so still logical-replication-free), **Bucardo for CDC**. Target = green project `jatchjltrqzdmghigvtu` with the **IPv4 add-on** (pgCopyDB uses a *direct* connection, not the pooler; the VM is IPv4-only and Supabase direct is IPv6-only without the add-on). Needed **pgcopydb 0.18 + postgresql-client-17** from PGDG, Debian's stock 0.10 is PG15-only and cannot dump a PG17 server.
 
 Source (AlloyDB, PG17) = full index-heavy `shop`: 25,553,940 rows, 17 indexes incl. a GIN on `events.payload`, 5 FKs.
 
@@ -61,10 +61,17 @@ Source (AlloyDB, PG17) = full index-heavy `shop`: 25,553,940 rows, 17 indexes in
 | parallelism | auto-split events→15 COPY procs (on event_id), orders/order_items→4 each; `--index-jobs 4` |
 
 - **Batteries included, and it showed:** one `pgcopydb clone` did schema (pre/post-data via pg_dump/pg_restore 17), parallel COPY with **automatic PK-range splitting** (no key-picking), parallel index rebuild **incl. the GIN**, and sequence resets, while filtering the AlloyDB source's sharp edges via flags: `--exclude-schema bucardo,ai,google_ml,public`, `--skip-extensions` (the `google_*` AlloyDB extensions), `--no-owner --no-acl`. Comparable wall-clock to the scale=100 Bucardo index-workaround (~19 min) but **fully automatic** vs the manual DROP/COPY/CREATE dance.
-- **Sharp edge (the "buy" tax) — reproducible hang after the GIN build:** pgcopydb **hangs after its index worker finishes the big `events` GIN** (`idx_events_payload`, 3.4 GB). The `CREATE INDEX` commits (its target connection goes `idle`, server-side alive), but the pgcopydb worker never proceeds/exits — 0% CPU, indefinitely (>15 min), needing a manual `pkill`. **The data + all 17 indexes are already complete and correct** before the hang, so the copy functionally succeeds; operationally it never exits cleanly. **`--skip-vacuum` does NOT fix it** (confirmed by a second full run — the earlier "vacuum phase" attribution was a red herring: the vacuum supervisor was merely *downstream* of the stuck index worker). Likely a pgcopydb 0.18 coordination bug triggered by the long-running GIN over the WAN. The DIY (simple pooler-friendly per-chunk COPY, no index handling) never hit anything like this. Practical options: exclude the GIN from pgcopydb (`[exclude-index]`) and build it manually after; wrap pgcopydb to kill-after-completion + `ANALYZE`; or try a newer pgcopydb.
-- **IPv4 add-on required:** cheap on Supabase ($4/mo, provisioned via the `/platform/` Management API); on a stricter managed platform with no direct-connection option it could be a hard blocker — the DIY-vs-buy tradeoff in miniature.
+- **Sharp edge (the "buy" tax): a long, silent operation over the cross-cloud WAN hangs the client. This is NOT a pgcopydb bug.** During the ~14 min `events` GIN build (`idx_events_payload`, 3.4 GB) the connection carries no traffic (the client sent `CREATE INDEX` and waits silently for the result), so a GCP-to-AWS idle-flow middlebox drops it. The index builds and commits fine server-side (`indisvalid=true`), but the completion never reaches the client, which blocks forever (0% CPU, needs a manual `pkill`). Diagnosed by elimination:
+  - `--skip-vacuum` did NOT help (the first run's "vacuum phase" was a red herring; vacuum was merely downstream of the stuck index step).
+  - Excluding the GIN (`[exclude-index] shop.idx_events_payload`) let pgcopydb sail through COPY, btrees, vacuum, and reach post-data in ~6 min with no hang, proving the GIN build (not pgcopydb) is the trigger.
+  - A plain `psql CREATE INDEX ... gin` outside pgcopydb hung identically (index `valid=true` server-side, client blocked), proving it is the WAN/connection, not the tool.
+  - pgcopydb's `keepalives_idle=10` did not prevent it (the path apparently ignores TCP keepalives).
 
-**CDC (Bucardo `onetimecopy=0`) on the pgcopydb-loaded target:** insert ~4 s, update ~3 s, delete ~4 s — identical to every other rung (size-independent). The full **pgCopyDB + Bucardo** pipeline works end to end.
+  The migrated data is always complete and correct regardless (25.5M rows, all 17 indexes valid, all 5 FKs). Mitigations: run big index builds from a client co-located with the target (in-region, not the cross-cloud copy host); or fire-and-forget server-side (issue `CREATE INDEX`, drop the WAN connection, poll `pg_index.indisvalid`); or exclude big indexes from pgcopydb and build them that way. The DIY snapshot copy dodged this only because it is index-light and streams data continuously; a large GIN built over this same WAN would hit it too.
+- **Ordering matters (buy tax #2):** pgcopydb cannot cleanly re-run against a source that already carries Bucardo's CDC triggers. Its schema dump includes the `bucardo.*` trigger definitions and the target post-data restore fails ("schema bucardo does not exist", 36 ignored errors); the FKs still restore. Run pgcopydb FIRST on a clean source, then add Bucardo.
+- **IPv4 add-on required:** cheap on Supabase ($4/mo, provisioned via the `/platform/` Management API); on a stricter managed platform with no direct-connection option it could be a hard blocker, the DIY-vs-buy tradeoff in miniature.
+
+**CDC (Bucardo `onetimecopy=0`) on the pgcopydb-loaded target:** insert ~4 s, update ~3 s, delete ~4 s, identical to every other rung (size-independent). The full **pgCopyDB + Bucardo** pipeline works end to end.
 
 ## Reproduction
 - Data generator: `sql/build_migtest.sql` (`\set scale N`; 1 -> 255K rows, 10 -> 2.55M).
