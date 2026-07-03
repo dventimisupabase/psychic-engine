@@ -74,6 +74,28 @@ Source (AlloyDB, PG17) = full index-heavy `shop`: 25,553,940 rows, 17 indexes in
 
 **CDC (Bucardo `onetimecopy=0`) on the pgcopydb-loaded target:** insert ~4 s, update ~3 s, delete ~4 s, identical to every other rung (size-independent). The full **pgCopyDB + Bucardo** pipeline works end to end.
 
+## CDC options: triggers vs logical replication (toolbox)
+
+Three ways to do ongoing CDC AlloyDB -> Supabase:
+
+| CDC option | mechanism | status on Supabase target |
+|---|---|---|
+| Bucardo | triggers (no LR) | works, ~3-4 s lag, every rung |
+| pgCopyDB `--follow` | pgCopyDB-managed logical decoding | **FAILS at setup** (see below) |
+| native LR (pub/sub) | self-managed `CREATE PUBLICATION`/`SUBSCRIPTION` | pending |
+
+**AlloyDB source is LR-capable (2026-07-03):** enabled `alloydb.logical_decoding=on` (flag + restart -> `wal_level=logical`), and `postgres` can `ALTER ROLE ... WITH REPLICATION` and create logical slots (`test_decoding` + `pgoutput`). So the source is not the blocker. (`wal2json` is not available on AlloyDB; use `test_decoding`.)
+
+**pgCopyDB `--follow` fails on the Supabase target, and it is the customer's exact wall.** The source slot is created fine (`Created logical replication slot "pgcopydb" with plugin "test_decoding"`), then pgCopyDB calls `pg_replication_origin_oid('pgcopydb')` on the *target* to track apply position and gets:
+
+```
+ERROR:  permission denied for function pg_replication_origin_oid
+```
+
+The `pg_replication_origin_*` functions are **superuser-only**, and Supabase's `postgres` is not a superuser, so pgCopyDB `--follow` cannot manage its apply-tracking origin and exits `rc=12`. This is why the customer moved off pgCopyDB `--follow`: a native `CREATE SUBSCRIPTION` manages replication origins **internally** (inside the apply worker), so it never issues the client-level `pg_replication_origin_*` call that pgCopyDB does. Note: on failure pgCopyDB leaves the **source slot behind**, drop it (`pg_drop_replication_slot`) or it retains WAL on AlloyDB.
+
+**native LR (next):** should sidestep the origin-permission wall, but it is *subscriber-pull*, so the Supabase subscriber must reach the private AlloyDB publisher (needs a public path: an AlloyDB public IP, or a tunnel via the VM's public IP + a firewall rule).
+
 ## Reproduction
 - Data generator: `sql/build_migtest.sql` (`\set scale N`; 1 -> 255K rows, 10 -> 2.55M).
 - Bucardo target wiring: drop stale target db, `bucardo add db <green> ...`, `add relgroup migrels`, `add table shop.* db=alloydb_src relgroup=migrels`, `add sync migsync relgroup=migrels dbs=alloydb_src:source,<green>:target onetimecopy=2`, `start`, `kick migsync 0`. See `bucardo/configure_sync.sh`.
