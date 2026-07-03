@@ -3,6 +3,11 @@
 Reproducible setup for replicating AlloyDB (source) -> Supabase (target) with
 Bucardo, part of the AlloyDB -> Supabase migration experiments.
 
+> **Operator runbook:** for the full end-to-end migration (pgCopyDB initial copy
+> + Bucardo CDC) with exact, copy-paste steps, see
+> [RUNBOOK-alloydb-to-supabase.md](RUNBOOK-alloydb-to-supabase.md). This README
+> is the Bucardo-tooling reference / quick notes behind that runbook.
+
 ## Result (pulse)
 Full initial copy of ~255k rows in ~9s, then ongoing CDC: a row inserted on the
 AlloyDB source lands on the Supabase target in ~4s.
