@@ -307,31 +307,57 @@ completion and blocks forever. The data and all other indexes are fine; only the
 client hangs. This affects any client (pgCopyDB or plain `psql`), not just
 pgCopyDB.
 
-**Mitigation:** exclude the big index from pgCopyDB and build it **server-side**
-so no WAN connection is held during the build. Add to `filters.ini`:
+**`CREATE INDEX CONCURRENTLY` does not fix this.** The hang is about the idle
+connection, not locking. CONCURRENTLY is still one statement the client blocks on
+with an idle connection for the whole build, so it drops the same way. It is
+worse on a drop: CONCURRENTLY is not atomic, so an interrupted build leaves an
+`INVALID` index you must drop and rebuild, whereas a plain `CREATE INDEX` often
+commits server-side despite the client hang. Retrying does not help either: the
+build outlasts the idle timeout on every attempt, so it fails deterministically.
+
+**Fix: detach the build from the fragile connection.** Exclude the big index from
+pgCopyDB and build it either server-side via `pg_cron` (a background worker, no
+long-held WAN connection) or from a client co-located with the target (AWS
+us-east-1). Add to `filters.ini`:
 
 ```ini
 [exclude-index]
 your_schema.your_big_gin_index
 ```
 
-Then, after the clone, build that index on the target via `pg_cron` (a
-background worker; no long-held connection). Run on the target:
+Then build it on the target via pg_cron and poll to completion:
 
 ```sql
--- one-off: schedule it, unschedule after it starts
+-- schedule it (runs in a background worker), then unschedule once it starts
 select cron.schedule('build_idx', '* * * * *',
   $job$SET statement_timeout=0; SET maintenance_work_mem='512MB';
        CREATE INDEX your_big_gin_index ON your_schema.events USING gin (payload)$job$);
--- watch pg_stat_activity for the CREATE INDEX to start, then:
+-- watch for the build to start, then stop the job from re-firing:
+--   select 1 from pg_stat_activity where query ilike '%your_big_gin_index%' and state='active';
 select cron.unschedule('build_idx');
--- poll until built:
+
+-- poll until valid:
 select indisvalid from pg_index i join pg_class c on c.oid=i.indexrelid
  where c.relname='your_big_gin_index';
+-- if the row exists but indisvalid=false, the build was interrupted (transient):
+--   drop index if exists your_schema.your_big_gin_index;   -- then reschedule
 ```
 
-(pg_cron is available on Supabase. Alternatively, run the `CREATE INDEX` from a
-client co-located with the target, in AWS us-east-1.)
+Notes:
+- pg_cron is available on Supabase; `cron.database_name` must be the database
+  holding your tables (usually `postgres`).
+- Poll until `indisvalid=true`; only **drop-and-retry if the index shows up
+  `INVALID`**. That retry covers a genuinely transient interruption, not the
+  deterministic idle-timeout hang above (which is why detaching the build, not
+  retrying, is the actual fix).
+- **When the target is live during the build** (the zero-downtime flow in
+  Appendix A, where Bucardo applies CDC to the target while you build the index),
+  prefer `CREATE INDEX CONCURRENTLY` so the build does not lock the table against
+  those writes. Caveat: CONCURRENTLY cannot run inside a transaction block, so it
+  may not run under pg_cron (pg_cron does run `VACUUM`, which has the same
+  restriction, so it may work; validate first); if not, run CONCURRENTLY from an
+  in-region client. In the **primary flow** the target takes no writes during the
+  build, so the plain `CREATE INDEX` above is fine and locking is not a concern.
 
 ### Verify the copy
 
