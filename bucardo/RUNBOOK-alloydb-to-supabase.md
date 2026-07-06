@@ -213,9 +213,17 @@ Do **not** create the app schema on the target yourself; pgCopyDB creates it.
 
 # Part 4: Install pgCopyDB and Bucardo on the VM
 
-Debian's stock `pgcopydb` is 0.10 and is **PostgreSQL 15 only**; it cannot dump
-a PostgreSQL 17 server (AlloyDB is PG17). Use the PGDG apt repository to get a
-current pgCopyDB and the PG17 client tools.
+pgCopyDB shells out to `pg_dump`/`pg_restore`, and `pg_dump` refuses to dump a
+server newer than itself. AlloyDB is **PG17**, so we need `pg_dump` **17** and a
+pgCopyDB built for PG17. We get both from the **PGDG apt repository** and pin the
+pgCopyDB build.
+
+Why PGDG and not just a newer base OS: no distro whose default PostgreSQL is
+below 17 ships a `pg_dump` that can dump PG17 (Debian 12 = PG15, Ubuntu 24.04 LTS
+= PG16), so you would add PGDG regardless. And a distro's own `pgcopydb` is
+frozen at release and lags upstream. PGDG is the authoritative, continuously
+updated source for pgCopyDB and every `postgresql-client-NN`, works on Debian and
+Ubuntu alike, and lets you pin an exact build.
 
 ```bash
 # On the VM: add PGDG
@@ -228,13 +236,24 @@ echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] h
   | sudo tee /etc/apt/sources.list.d/pgdg.list
 sudo apt-get update
 
-# pgCopyDB (>= 0.18) + PG17 client + Bucardo + Perl deps
-sudo apt-get install -y postgresql-client-17 pgcopydb bucardo postgresql postgresql-plperl
+# Check the available pgcopydb build for your base OS, then pin it:
+apt-cache policy pgcopydb        # e.g. Candidate: 0.18-1.pgdg12+1 on Debian 12
 
-# Verify: pgcopydb should say "compatible with Postgres ... 17"
+# Pin pgcopydb to a known-good build. Adjust the build suffix to your base OS:
+#   Debian 12 -> pgdg12+1,  Debian 13 -> pgdg13+1,  Ubuntu 24.04 -> pgdg24.04+1
+# postgresql-client-17 stays major-pinned to 17 (any 17.x pg_dump works, and you
+# still get 17.x security updates).
+PGCOPYDB_VER="0.18-1.pgdg12+1"
+sudo apt-get install -y \
+  postgresql-client-17 \
+  "pgcopydb=${PGCOPYDB_VER}" \
+  bucardo postgresql postgresql-plperl
+sudo apt-mark hold pgcopydb      # freeze pgcopydb against accidental upgrades
+
+# Verify: pgcopydb should say "compatible with Postgres ... 17"; pg_dump must be 17.x
 export PATH=/usr/lib/postgresql/17/bin:$PATH
 pgcopydb --version
-pg_dump --version   # must be 17.x
+pg_dump --version
 ```
 
 Note: `apt-get install bucardo postgresql` also installs a local PostgreSQL on
