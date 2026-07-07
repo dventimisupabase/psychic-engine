@@ -558,12 +558,17 @@ read-only for the duration of the copy, capture changes **during** the copy:
    schema). Because Bucardo is only recording (not applying), there is no
    COPY-vs-apply conflict.
 4. Build any excluded indexes on the target (pg_cron, Part 5).
-5. `sudo -u bucardo bucardo update sync migsync autokick=1` and
-   `sudo -u bucardo bucardo kick migsync`. Bucardo now applies the accumulated
-   deltas by re-reading current source rows per key (idempotent upsert), so any
-   row changed during the copy converges to its current value. Ongoing CDC then
-   continues normally.
+5. `sudo -u bucardo bucardo update sync migsync autokick=1`, then
+   `sudo -u bucardo bucardo reload sync migsync`, then
+   `sudo -u bucardo bucardo kick migsync 60`. The `reload` is required: an
+   `update` alone does not take effect until the sync is reloaded, so without it
+   ongoing changes keep queuing instead of applying. The `kick` drains the
+   deltas accumulated during the copy, applied by re-reading current source rows
+   per key (idempotent upsert), so any row inserted / updated / deleted during
+   the copy converges to its current state. After the reload, ongoing CDC
+   auto-applies normally.
 
 This ordering is the standard trigger-based-CDC pattern but has more moving
-parts than the simple flow. **Validate it in a staging copy before running it
-against production data.**
+parts than the simple flow. Validated end to end (2026-07-07): triggers recording
+with `autokick=0` correctly defer apply; the post-copy `reload` + `kick` converge
+insert/update/delete; ongoing autokick then replicates in a few seconds.
