@@ -244,10 +244,13 @@ apt-cache policy pgcopydb        # e.g. Candidate: 0.18-1.pgdg12+1 on Debian 12
 # postgresql-client-17 stays major-pinned to 17 (any 17.x pg_dump works, and you
 # still get 17.x security updates).
 PGCOPYDB_VER="0.18-1.pgdg12+1"
+# NB: install VERSIONED postgresql-17 / postgresql-plperl-17. With PGDG enabled,
+# the unversioned metapackages `postgresql` / `postgresql-plperl` have no
+# installation candidate and apt will error. (PGDG also carries bucardo 5.6.0.)
 sudo apt-get install -y \
   postgresql-client-17 \
   "pgcopydb=${PGCOPYDB_VER}" \
-  bucardo postgresql postgresql-plperl
+  bucardo postgresql-17 postgresql-plperl-17
 sudo apt-mark hold pgcopydb      # freeze pgcopydb against accidental upgrades
 
 # Verify: pgcopydb should say "compatible with Postgres ... 17"; pg_dump must be 17.x
@@ -377,19 +380,16 @@ done
 
 ## 6a. Install the Bucardo control database (one time)
 
-`bucardo install` is interactive. Run it as the local `postgres` superuser over
-the unix socket (peer auth), then set the control-role password to match
-`/etc/bucardorc`.
+`bucardo install` is interactive (it reads a menu from a PTY) and runs as the
+local `postgres` superuser over the unix socket. Two gotchas the order below
+avoids: it needs a real terminal (use the repo's expect script), and PGDG's
+bucardo ships `/etc/bucardorc` mode 640 which `postgres` cannot read, so write a
+readable one FIRST.
 
 ```bash
-# On the VM
-sudo -u postgres bucardo install \
-  --dbhost=/var/run/postgresql --dbuser=postgres --dbname=postgres
-# When prompted, accept defaults (P to proceed). If it refuses to run
-# non-interactively, use the expect script in this repo: bucardo/bucardo_install.exp
-
-# Set the control-role password and matching /etc/bucardorc
-sudo -u postgres psql -c "ALTER ROLE bucardo PASSWORD 'bucardo';"
+# On the VM.
+# 1. Write a world-readable /etc/bucardorc BEFORE installing (postgres must read it):
+sudo mkdir -p /var/run/bucardo && sudo chown bucardo:bucardo /var/run/bucardo
 sudo tee /etc/bucardorc >/dev/null <<'EOF'
 dbport = 5432
 dbhost = localhost
@@ -397,9 +397,17 @@ dbname = bucardo
 dbuser = bucardo
 dbpass = bucardo
 EOF
+sudo chmod 644 /etc/bucardorc
+
+# 2. Install the control DB via the expect script (gives bucardo install a PTY;
+#    it connects as the postgres superuser over the socket):
+expect -f bucardo_install.exp
+
+# 3. Align the control-role password with /etc/bucardorc and verify:
+sudo -u postgres psql -p 5432 -c "ALTER ROLE bucardo PASSWORD 'bucardo';"
 
 # The daemon and its files live under the 'bucardo' OS user. Always drive it as:
-sudo -u bucardo bucardo status
+sudo -u bucardo bucardo status     # expect: "No syncs have been created yet."
 ```
 
 ## 6b. Register databases, tables, and the sync
