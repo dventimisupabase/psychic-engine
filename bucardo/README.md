@@ -7,6 +7,12 @@ Bucardo, part of the AlloyDB -> Supabase migration experiments.
 > + Bucardo CDC) with exact, copy-paste steps, see
 > [RUNBOOK-alloydb-to-supabase.md](RUNBOOK-alloydb-to-supabase.md). This README
 > is the Bucardo-tooling reference / quick notes behind that runbook.
+>
+> **One-command CDC setup:** [`bucardo_migrate.sh`](bucardo_migrate.sh)
+> auto-enumerates every replicatable table (and sequence) on the source and
+> wires up the whole Bucardo sync in one shot (`--dry-run` to preview,
+> `--verify` for row-count parity). It is the recommended way to do the runbook's
+> Part 6b without touching Bucardo by hand.
 
 ## Result (pulse)
 Full initial copy of ~255k rows in ~9s, then ongoing CDC: a row inserted on the
