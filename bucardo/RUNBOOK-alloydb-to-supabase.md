@@ -404,6 +404,31 @@ sudo -u bucardo bucardo status
 
 ## 6b. Register databases, tables, and the sync
 
+**One-command option (recommended).** [`bucardo_migrate.sh`](bucardo_migrate.sh)
+in this repo does all of 6b for you: it enumerates every replicatable table (and
+sequence) on the source, tears down any prior sync of the same name, and creates
+and starts the sync (`onetimecopy=0`). You never list tables or touch Bucardo
+directly. Run it on the VM after the pgCopyDB copy:
+
+```bash
+# Preview what would be replicated (no changes):
+SRC_DB="$SRC_DB" SRC_PASS='SRC_PW' \
+TGT_HOST="aws-0-${SB_REGION}.pooler.supabase.com" TGT_USER="postgres.${SB_REF}" TGT_PASS='SB_PW' \
+  ./bucardo_migrate.sh --dry-run
+
+# Apply, then check row-count parity:
+SRC_DB="$SRC_DB" SRC_PASS='SRC_PW' \
+TGT_HOST="aws-0-${SB_REGION}.pooler.supabase.com" TGT_USER="postgres.${SB_REF}" TGT_PASS='SB_PW' \
+  ./bucardo_migrate.sh --verify
+```
+
+It skips (and lists) any table without a PK/unique index, since Bucardo cannot
+replicate those; pass `STRICT=1` to abort instead. See the script header for all
+knobs (`SCHEMAS`, `EXCLUDE_SCHEMAS`, `SYNC`, `REPLICATE_SEQUENCES`, ...). Then go
+to Part 7 to validate. Requires the control DB from 6a.
+
+The manual equivalent is below, for reference or debugging:
+
 ```bash
 # Source (AlloyDB via the proxy) and target (Supabase via the session pooler)
 sudo -u bucardo bucardo add db srcdb \
